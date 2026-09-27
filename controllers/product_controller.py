@@ -19,11 +19,28 @@ class ProductController:
 
         products = query.order_by(Product.created_at.desc()).all()
 
+        if not products:
+            return jsonify([])
+
+        # ─── FIX: fetch ALL images for these products in ONE query ───
+        # instead of one query per product (was causing 5-10s load times
+        # once the DB moved from localhost to a remote Supabase host).
+        product_ids = [p.id for p in products]
+        all_images = (
+            ProductImage.query
+            .filter(ProductImage.product_id.in_(product_ids))
+            .order_by(ProductImage.position)
+            .all()
+        )
+
+        images_by_product = {}
+        for img in all_images:
+            images_by_product.setdefault(img.product_id, []).append(img.to_dict())
+
         result = []
         for product in products:
             product_dict = product.to_dict()
-            images = ProductImage.query.filter_by(product_id=product.id).order_by(ProductImage.position).all()
-            product_dict['images'] = [img.to_dict() for img in images]
+            product_dict['images'] = images_by_product.get(product.id, [])
             result.append(product_dict)
 
         return jsonify(result)
@@ -134,14 +151,14 @@ class ProductController:
             for item in cart_items:
                 db.session.delete(item)
             db.session.commit()
-            print(f"✅ Deleted {len(cart_items)} cart items for product {product_id}")
+            print(f"Deleted {len(cart_items)} cart items for product {product_id}")
 
             # ─── STEP 2: Delete order items referencing this product ───
             order_items = OrderItem.query.filter_by(product_id=product_id).all()
             for item in order_items:
                 db.session.delete(item)
             db.session.commit()
-            print(f"✅ Deleted {len(order_items)} order items for product {product_id}")
+            print(f"Deleted {len(order_items)} order items for product {product_id}")
 
             # ─── STEP 3: Get all images ───
             images = ProductImage.query.filter_by(product_id=product_id).all()
@@ -150,20 +167,20 @@ class ProductController:
             for img in images:
                 try:
                     delete_image(img.image_url)
-                    print(f"✅ Deleted from Supabase: {img.image_url}")
+                    print(f"Deleted from Supabase: {img.image_url}")
                 except Exception as e:
-                    print(f"⚠️ Error deleting image {img.id}: {e}")
+                    print(f"Error deleting image {img.id}: {e}")
 
             # ─── STEP 5: Delete product ───
             db.session.delete(product)
             db.session.commit()
 
-            print(f"✅ Product {product_id} deleted successfully")
+            print(f"Product {product_id} deleted successfully")
             return jsonify({"message": "Product deleted successfully"}), 200
 
         except Exception as e:
             db.session.rollback()
-            print(f"❌ Delete error: {e}")
+            print(f"Delete error: {e}")
             return jsonify({"error": str(e)}), 500
 
     @staticmethod
@@ -201,10 +218,10 @@ class ProductController:
                     )
                     db.session.add(image)
                     uploaded.append(public_url)
-                    print(f"✅ Uploaded image {idx + 1}: {public_url}")
+                    print(f"Uploaded image {idx + 1}: {public_url}")
 
                 except Exception as e:
-                    print(f"❌ Error uploading image {idx + 1}: {e}")
+                    print(f"Error uploading image {idx + 1}: {e}")
 
             db.session.commit()
 
@@ -215,7 +232,7 @@ class ProductController:
 
         except Exception as e:
             db.session.rollback()
-            print(f"❌ Upload error: {e}")
+            print(f"Upload error: {e}")
             return jsonify({"error": str(e)}), 500
 
     @staticmethod
