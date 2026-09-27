@@ -1,5 +1,5 @@
 from flask import request, jsonify, send_file
-from models import db, Order, OrderItem, CartItem, Product, User
+from models import db, Order, OrderItem, CartItem, Product, ProductVariant, User
 from controllers.email_controller import EmailController
 from utils.invoice_generator import InvoiceGenerator
 import threading
@@ -45,7 +45,25 @@ class OrderController:
         order_items_data = []
         for item in items:
             product = Product.query.get(item.product_id)
-            if product:
+            if not product:
+                continue
+
+            color_name = None
+
+            # ─── If a color was chosen, check & decrement THAT color's stock ───
+            if item.variant_id:
+                variant = ProductVariant.query.get(item.variant_id)
+                if not variant:
+                    db.session.rollback()
+                    return jsonify({"error": f"Selected color is no longer available for {product.name}"}), 400
+                if variant.stock < item.quantity:
+                    db.session.rollback()
+                    return jsonify({
+                        "error": f"Insufficient stock for {product.name} ({variant.color_name}). Available: {variant.stock}, Required: {item.quantity}"
+                    }), 400
+                variant.stock -= item.quantity
+                color_name = variant.color_name
+            else:
                 if product.stock >= item.quantity:
                     product.stock -= item.quantity
                 else:
@@ -54,21 +72,24 @@ class OrderController:
                         "error": f"Insufficient stock for {product.name}. Available: {product.stock}, Required: {item.quantity}"
                     }), 400
 
-            # ─── SAVE COST PRICE IN ORDER ITEM ───
+            # ─── SAVE COST PRICE + COLOR IN ORDER ITEM ───
             order_item = OrderItem(
                 order_id=order.id,
                 product_id=item.product_id,
+                variant_id=item.variant_id,
+                color_name=color_name,
                 product_name=item.product.name,
                 price=item.product.price,
-                cost_price=item.product.cost_price or 0,  # ← NEW
+                cost_price=item.product.cost_price or 0,
                 quantity=item.quantity,
             )
             db.session.add(order_item)
             order_items_data.append({
                 "product_name": item.product.name,
+                "color_name": color_name,
                 "quantity": item.quantity,
                 "price": item.product.price,
-                "cost_price": item.product.cost_price or 0  # ← NEW
+                "cost_price": item.product.cost_price or 0
             })
             db.session.delete(item)
 
@@ -78,9 +99,9 @@ class OrderController:
         invoice_path = None
         try:
             invoice_path = InvoiceGenerator.generate_invoice(order, order_items_data, user)
-            print(f"✅ Invoice generated: {invoice_path}")
+            print(f"Invoice generated: {invoice_path}")
         except Exception as e:
-            print(f"❌ Invoice generation error: {e}")
+            print(f"Invoice generation error: {e}")
             print(traceback.format_exc())
 
         # ─── SEND ORDER CONFIRMATION EMAIL ───
@@ -152,7 +173,7 @@ class OrderController:
             return jsonify(order_dict), 200
 
         except Exception as e:
-            print(f"❌ Get order error: {e}")
+            print(f"Get order error: {e}")
             print(traceback.format_exc())
             return jsonify({"error": str(e)}), 500
 
@@ -185,7 +206,7 @@ class OrderController:
             return jsonify(order_dict), 200
 
         except Exception as e:
-            print(f"❌ Get order error: {e}")
+            print(f"Get order error: {e}")
             print(traceback.format_exc())
             return jsonify({"error": str(e)}), 500
 
@@ -207,9 +228,10 @@ class OrderController:
                 order_items = OrderItem.query.filter_by(order_id=order_id).all()
                 order_items_data = [{
                     "product_name": item.product_name,
+                    "color_name": item.color_name,
                     "quantity": item.quantity,
                     "price": item.price,
-                    "cost_price": item.cost_price or 0  # ← NEW
+                    "cost_price": item.cost_price or 0
                 } for item in order_items]
 
                 invoice_path = InvoiceGenerator.generate_invoice(order, order_items_data, user)
@@ -222,7 +244,7 @@ class OrderController:
             )
 
         except Exception as e:
-            print(f"❌ Invoice download error: {e}")
+            print(f"Invoice download error: {e}")
             print(traceback.format_exc())
             return jsonify({"error": str(e)}), 500
 
@@ -246,7 +268,7 @@ class OrderController:
 
     @staticmethod
     def update_status(order_id):
-        from models import Order, OrderItem, Product, User
+        from models import Order, OrderItem, Product, ProductVariant, User
         from controllers.email_controller import EmailController
 
         order = Order.query.get(order_id)
@@ -266,13 +288,18 @@ class OrderController:
 
         order_items = OrderItem.query.filter_by(order_id=order_id).all()
 
-        # If order is being cancelled - restore stock
+        # If order is being cancelled - restore stock (to the right color, if any)
         if new_status == "cancelled" and old_status != "cancelled":
             try:
                 for item in order_items:
-                    product = Product.query.get(item.product_id)
-                    if product:
-                        product.stock += item.quantity
+                    if item.variant_id:
+                        variant = ProductVariant.query.get(item.variant_id)
+                        if variant:
+                            variant.stock += item.quantity
+                    else:
+                        product = Product.query.get(item.product_id)
+                        if product:
+                            product.stock += item.quantity
                 db.session.commit()
 
                 # Send cancellation email
@@ -291,6 +318,7 @@ class OrderController:
                             "items": [
                                 {
                                     "product_name": item.product_name,
+                                    "color_name": item.color_name,
                                     "quantity": item.quantity,
                                     "price": item.price
                                 }
@@ -323,6 +351,7 @@ class OrderController:
                         "items": [
                             {
                                 "product_name": item.product_name,
+                                "color_name": item.color_name,
                                 "quantity": item.quantity,
                                 "price": item.price
                             }
@@ -343,16 +372,17 @@ class OrderController:
                 user = User.query.get(order.user_id)
                 order_items_data = [{
                     "product_name": item.product_name,
+                    "color_name": item.color_name,
                     "quantity": item.quantity,
                     "price": item.price,
-                    "cost_price": item.cost_price or 0  # ← NEW
+                    "cost_price": item.cost_price or 0
                 } for item in order_items]
 
                 # Generate/update invoice with new status
                 InvoiceGenerator.generate_invoice(order, order_items_data, user)
-                print(f"✅ Invoice updated with status: {new_status}")
+                print(f"Invoice updated with status: {new_status}")
             except Exception as e:
-                print(f"❌ Invoice generation error on status change: {e}")
+                print(f"Invoice generation error on status change: {e}")
 
         # Return updated order with email
         order_dict = order.to_dict()
@@ -380,6 +410,7 @@ class OrderController:
         # ─── CALCULATE TOTALS ───
         subtotal = 0
         order_items_data = []
+        variant_updates = []
         product_updates = []
 
         for item in items:
@@ -388,12 +419,27 @@ class OrderController:
                 return jsonify({"error": f"Product not found: {item.get('product_id')}"}), 404
 
             quantity = item.get("quantity", 1)
+            variant_id = item.get("variant_id")
+            color_name = None
 
-            # Check stock
-            if product.stock < quantity:
-                return jsonify({
-                    "error": f"Insufficient stock for {product.name}. Available: {product.stock}, Required: {quantity}"
-                }), 400
+            # ─── If a color was chosen, check stock on THAT color ───
+            if variant_id:
+                variant = ProductVariant.query.filter_by(id=variant_id, product_id=product.id).first()
+                if not variant:
+                    return jsonify({"error": f"Selected color is no longer available for {product.name}"}), 400
+                if variant.stock < quantity:
+                    return jsonify({
+                        "error": f"Insufficient stock for {product.name} ({variant.color_name}). Available: {variant.stock}, Required: {quantity}"
+                    }), 400
+                color_name = variant.color_name
+                variant_updates.append({"variant": variant, "quantity": quantity})
+            else:
+                # Check stock
+                if product.stock < quantity:
+                    return jsonify({
+                        "error": f"Insufficient stock for {product.name}. Available: {product.stock}, Required: {quantity}"
+                    }), 400
+                product_updates.append({"product": product, "quantity": quantity})
 
             item_price = product.price
             item_total = item_price * quantity
@@ -401,15 +447,11 @@ class OrderController:
 
             order_items_data.append({
                 "product_id": product.id,
+                "variant_id": variant_id,
+                "color_name": color_name,
                 "product_name": product.name,
                 "price": item_price,
-                "cost_price": product.cost_price or 0,  # ← NEW
-                "quantity": quantity
-            })
-
-            # Track stock update
-            product_updates.append({
-                "product": product,
+                "cost_price": product.cost_price or 0,
                 "quantity": quantity
             })
 
@@ -435,19 +477,23 @@ class OrderController:
         db.session.add(order)
         db.session.flush()
 
-        # ─── CREATE ORDER ITEMS & UPDATE STOCK ───
+        # ─── CREATE ORDER ITEMS ───
         for item_data in order_items_data:
             order_item = OrderItem(
                 order_id=order.id,
                 product_id=item_data["product_id"],
+                variant_id=item_data["variant_id"],
+                color_name=item_data["color_name"],
                 product_name=item_data["product_name"],
                 price=item_data["price"],
-                cost_price=item_data["cost_price"],  # ← NEW
+                cost_price=item_data["cost_price"],
                 quantity=item_data["quantity"],
             )
             db.session.add(order_item)
 
-        # Update product stock
+        # ─── UPDATE STOCK (variant-specific where applicable) ───
+        for update in variant_updates:
+            update["variant"].stock -= update["quantity"]
         for update in product_updates:
             update["product"].stock -= update["quantity"]
 
@@ -470,9 +516,9 @@ class OrderController:
             )
 
             invoice_path = InvoiceGenerator.generate_invoice(order, order_items_data, guest_user)
-            print(f"✅ Guest invoice generated: {invoice_path}")
+            print(f"Guest invoice generated: {invoice_path}")
         except Exception as e:
-            print(f"❌ Guest invoice generation error: {e}")
+            print(f"Guest invoice generation error: {e}")
             print(traceback.format_exc())
 
         # ─── SEND ORDER CONFIRMATION EMAIL ───
@@ -513,7 +559,7 @@ class OrderController:
             thread = threading.Thread(target=send_email_async)
             thread.daemon = True
             thread.start()
-            print(f"✅ Guest order confirmation email queued for #{order.id} to {guest_email}")
+            print(f"Guest order confirmation email queued for #{order.id} to {guest_email}")
 
         except Exception as e:
             print(f"Failed to queue email: {e}")
@@ -546,5 +592,5 @@ class OrderController:
             return jsonify(order_dict), 200
 
         except Exception as e:
-            print(f"❌ Get guest order error: {e}")
+            print(f"Get guest order error: {e}")
             return jsonify({"error": str(e)}), 500
