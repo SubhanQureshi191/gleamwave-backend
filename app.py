@@ -464,6 +464,21 @@ def reset_password():
 def resend_otp():
     return PasswordResetController.resend_otp()
 
+# Add these two routes in app.py, alongside your existing
+# "/api/admin/products/<int:product_id>/images" and
+# "/api/admin/products/images/<int:image_id>" routes.
+
+@app.route("/api/admin/products/variants/<int:variant_id>/image", methods=["POST"])
+@admin_required
+def upload_variant_image(variant_id):
+    return ProductController.upload_variant_image(variant_id)
+
+
+@app.route("/api/admin/products/variants/<int:variant_id>", methods=["DELETE"])
+@admin_required
+def delete_product_variant(variant_id):
+    return ProductController.delete_variant(variant_id)
+
 
 # ─── CREATE TABLES ──────────────────────────────────────
 with app.app_context():

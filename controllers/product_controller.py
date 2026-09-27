@@ -1,5 +1,5 @@
 from flask import request, jsonify
-from models import db, Product, ProductImage, CartItem, OrderItem
+from models import db, Product, ProductImage, ProductVariant, CartItem, OrderItem
 from utils.supabase_client import upload_image, delete_image
 import datetime
 
@@ -22,25 +22,35 @@ class ProductController:
         if not products:
             return jsonify([])
 
-        # ─── FIX: fetch ALL images for these products in ONE query ───
-        # instead of one query per product (was causing 5-10s load times
-        # once the DB moved from localhost to a remote Supabase host).
         product_ids = [p.id for p in products]
+
+        # ─── batch fetch images (avoids N+1 queries) ───
         all_images = (
             ProductImage.query
             .filter(ProductImage.product_id.in_(product_ids))
             .order_by(ProductImage.position)
             .all()
         )
-
         images_by_product = {}
         for img in all_images:
             images_by_product.setdefault(img.product_id, []).append(img.to_dict())
+
+        # ─── batch fetch color variants (same pattern) ───
+        all_variants = (
+            ProductVariant.query
+            .filter(ProductVariant.product_id.in_(product_ids))
+            .order_by(ProductVariant.position)
+            .all()
+        )
+        variants_by_product = {}
+        for v in all_variants:
+            variants_by_product.setdefault(v.product_id, []).append(v.to_dict())
 
         result = []
         for product in products:
             product_dict = product.to_dict()
             product_dict['images'] = images_by_product.get(product.id, [])
+            product_dict['variants'] = variants_by_product.get(product.id, [])
             result.append(product_dict)
 
         return jsonify(result)
@@ -54,6 +64,9 @@ class ProductController:
         product_dict = product.to_dict()
         images = ProductImage.query.filter_by(product_id=product.id).order_by(ProductImage.position).all()
         product_dict['images'] = [img.to_dict() for img in images]
+
+        variants = ProductVariant.query.filter_by(product_id=product.id).order_by(ProductVariant.position).all()
+        product_dict['variants'] = [v.to_dict() for v in variants]
 
         return jsonify(product_dict)
 
@@ -89,10 +102,29 @@ class ProductController:
                 stock=int(data.get("stock", 10)),
             )
             db.session.add(product)
+            db.session.flush()  # get product.id before commit, needed for variant rows
+
+            # ─── OPTIONAL COLOR VARIANTS ───
+            # Expected shape: "variants": [{"color_name": "Green", "stock": 5}, ...]
+            # Images are uploaded separately afterwards, once each variant has an ID.
+            created_variants = []
+            for idx, v in enumerate(data.get("variants", []) or []):
+                if not v.get("color_name"):
+                    continue
+                variant = ProductVariant(
+                    product_id=product.id,
+                    color_name=v.get("color_name"),
+                    stock=int(v.get("stock", 0)),
+                    position=idx,
+                )
+                db.session.add(variant)
+                created_variants.append(variant)
+
             db.session.commit()
 
             product_dict = product.to_dict()
             product_dict['images'] = []
+            product_dict['variants'] = [v.to_dict() for v in created_variants]
 
             return jsonify(product_dict), 201
 
@@ -127,11 +159,36 @@ class ProductController:
             product.description = data.get("description", product.description)
             product.stock = int(data.get("stock", product.stock))
 
+            # ─── UPSERT COLOR VARIANTS ───
+            # Each entry may include "id" (existing variant -> update it)
+            # or omit it (new color -> create it). Deleting a variant is a
+            # separate call (DELETE /admin/products/variants/<id>), same
+            # pattern as deleting a product image.
+            if "variants" in data:
+                for idx, v in enumerate(data.get("variants", []) or []):
+                    variant_id = v.get("id")
+                    if variant_id:
+                        variant = ProductVariant.query.filter_by(id=variant_id, product_id=product_id).first()
+                        if variant:
+                            variant.color_name = v.get("color_name", variant.color_name)
+                            variant.stock = int(v.get("stock", variant.stock))
+                    else:
+                        if v.get("color_name"):
+                            new_variant = ProductVariant(
+                                product_id=product_id,
+                                color_name=v.get("color_name"),
+                                stock=int(v.get("stock", 0)),
+                                position=idx,
+                            )
+                            db.session.add(new_variant)
+
             db.session.commit()
 
             product_dict = product.to_dict()
             images = ProductImage.query.filter_by(product_id=product.id).order_by(ProductImage.position).all()
             product_dict['images'] = [img.to_dict() for img in images]
+            variants = ProductVariant.query.filter_by(product_id=product.id).order_by(ProductVariant.position).all()
+            product_dict['variants'] = [v.to_dict() for v in variants]
 
             return jsonify(product_dict), 200
 
@@ -160,10 +217,22 @@ class ProductController:
             db.session.commit()
             print(f"Deleted {len(order_items)} order items for product {product_id}")
 
-            # ─── STEP 3: Get all images ───
+            # ─── STEP 3: Delete color variants (and their Supabase images) ───
+            variants = ProductVariant.query.filter_by(product_id=product_id).all()
+            for variant in variants:
+                if variant.image_url:
+                    try:
+                        delete_image(variant.image_url)
+                    except Exception as e:
+                        print(f"Error deleting variant image {variant.id}: {e}")
+                db.session.delete(variant)
+            db.session.commit()
+            print(f"Deleted {len(variants)} color variants for product {product_id}")
+
+            # ─── STEP 4: Get all general images ───
             images = ProductImage.query.filter_by(product_id=product_id).all()
 
-            # ─── STEP 4: Delete images from Supabase Storage ───
+            # ─── STEP 5: Delete general images from Supabase Storage ───
             for img in images:
                 try:
                     delete_image(img.image_url)
@@ -171,7 +240,7 @@ class ProductController:
                 except Exception as e:
                     print(f"Error deleting image {img.id}: {e}")
 
-            # ─── STEP 5: Delete product ───
+            # ─── STEP 6: Delete product ───
             db.session.delete(product)
             db.session.commit()
 
@@ -246,6 +315,65 @@ class ProductController:
             db.session.delete(image)
             db.session.commit()
             return jsonify({"message": "Image deleted"}), 200
+
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({"error": str(e)}), 500
+
+    # ═══════════════════════════════════════════════════════════════
+    # ─── COLOR VARIANT IMAGE HANDLING ───
+    # ═══════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def upload_variant_image(variant_id):
+        """Upload (or replace) the single image for one color variant."""
+        variant = ProductVariant.query.get(variant_id)
+        if not variant:
+            return jsonify({"error": "Color variant not found"}), 404
+
+        if "image" not in request.files:
+            return jsonify({"error": "No image provided"}), 400
+
+        file = request.files["image"]
+        if file.filename == '':
+            return jsonify({"error": "No valid image selected"}), 400
+
+        try:
+            # Replace old image if one already exists for this color
+            if variant.image_url:
+                try:
+                    delete_image(variant.image_url)
+                except Exception as e:
+                    print(f"Could not delete old variant image: {e}")
+
+            public_url = upload_image(file, f"variant-{variant.product_id}", variant.id)
+            variant.image_url = public_url
+            db.session.commit()
+
+            return jsonify(variant.to_dict()), 200
+
+        except Exception as e:
+            db.session.rollback()
+            print(f"Variant image upload error: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    @staticmethod
+    def delete_variant(variant_id):
+        """Delete a single color variant entirely (used when admin removes a color)."""
+        variant = ProductVariant.query.get(variant_id)
+        if not variant:
+            return jsonify({"error": "Color variant not found"}), 404
+
+        try:
+            if variant.image_url:
+                try:
+                    delete_image(variant.image_url)
+                except Exception as e:
+                    print(f"Error deleting variant image: {e}")
+
+            db.session.delete(variant)
+            db.session.commit()
+            return jsonify({"message": "Color variant deleted successfully"}), 200
 
         except Exception as e:
             db.session.rollback()
