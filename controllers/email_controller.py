@@ -1,9 +1,6 @@
 from flask import request, jsonify
-import smtplib
-import ssl
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from config import Config
+from utils.email_sender import send_email
 import traceback
 
 
@@ -35,13 +32,6 @@ class EmailController:
                 print(f"Warning: Invalid email address: {email}")
                 return False, "Invalid email address"
 
-            sender_email = Config.EMAIL_SENDER
-            sender_password = Config.EMAIL_PASSWORD
-
-            if not sender_email or not sender_password:
-                print("Email credentials missing!")
-                return False, "Email configuration missing"
-
             print(f"Sending confirmation email to: {email}")
             print(f"Order: #{order_id}")
 
@@ -49,6 +39,9 @@ class EmailController:
             items_html = ""
             for item in items:
                 product_name = item.get("product_name", item.get("product", {}).get("name", "Product"))
+                color_name = item.get("color_name")
+                if color_name:
+                    product_name = f"{product_name} ({color_name})"
                 quantity = item.get("quantity", 1)
                 price = item.get("price", item.get("product", {}).get("price", 0))
                 subtotal_item = price * quantity
@@ -92,21 +85,15 @@ class EmailController:
                 is_confirmation=True
             )
 
-            msg = MIMEMultipart()
-            msg["From"] = sender_email
-            msg["To"] = email
-            msg["Subject"] = f"Order Confirmed! #{order_id} - Gleamwave"
-            msg.attach(MIMEText(body, "html"))
-
-            # Send email
-            EmailController._send_email(msg, sender_email, sender_password)
+            send_email(
+                to_email=email,
+                subject=f"Order Confirmed! #{order_id} - Gleamwave",
+                html_body=body,
+            )
 
             print(f"Order confirmation email sent to {email}")
             return True, "Email sent successfully"
 
-        except smtplib.SMTPAuthenticationError as e:
-            print(f"SMTP Authentication Error: {e}")
-            return False, str(e)
         except Exception as e:
             print(f"Email error: {e}")
             print(traceback.format_exc())
@@ -135,13 +122,6 @@ class EmailController:
                 print(f"Warning: Invalid email address: {email}")
                 return False, "Invalid email address"
 
-            sender_email = Config.EMAIL_SENDER
-            sender_password = Config.EMAIL_PASSWORD
-
-            if not sender_email or not sender_password:
-                print("Email credentials missing!")
-                return False, "Email configuration missing"
-
             print(f"Sending status email to: {email}")
             print(f"Order: #{order_id}, Status: {status}")
 
@@ -160,6 +140,9 @@ class EmailController:
             items_html = ""
             for item in items:
                 product_name = item.get("product_name", item.get("product", {}).get("name", "Product"))
+                color_name = item.get("color_name")
+                if color_name:
+                    product_name = f"{product_name} ({color_name})"
                 quantity = item.get("quantity", 1)
                 price = item.get("price", item.get("product", {}).get("price", 0))
                 subtotal_item = price * quantity
@@ -188,14 +171,11 @@ class EmailController:
                 status_message=message
             )
 
-            msg = MIMEMultipart()
-            msg["From"] = sender_email
-            msg["To"] = email
-            msg["Subject"] = f"Order #{order_id} - {status.upper()} - Gleamwave"
-            msg.attach(MIMEText(body, "html"))
-
-            # Send email
-            EmailController._send_email(msg, sender_email, sender_password)
+            send_email(
+                to_email=email,
+                subject=f"Order #{order_id} - {status.upper()} - Gleamwave",
+                html_body=body,
+            )
 
             print(f"Status email sent to {email}")
             return True, "Email sent successfully"
@@ -220,17 +200,6 @@ class EmailController:
 
             if not name or not email or not message:
                 return jsonify({"error": "Name, email and message are required"}), 400
-
-            sender_email = Config.EMAIL_SENDER
-            sender_password = Config.EMAIL_PASSWORD
-
-            if not sender_email or not sender_password:
-                return jsonify({"error": "Email configuration missing"}), 500
-
-            msg = MIMEMultipart()
-            msg["From"] = sender_email
-            msg["To"] = Config.EMAIL_RECEIVER
-            msg["Subject"] = f"New Contact Form Message from {name}"
 
             body = f"""
             <html>
@@ -279,9 +248,11 @@ class EmailController:
             </html>
             """
 
-            msg.attach(MIMEText(body, "html"))
-
-            EmailController._send_email(msg, sender_email, sender_password)
+            send_email(
+                to_email=Config.EMAIL_RECEIVER,
+                subject=f"New Contact Form Message from {name}",
+                html_body=body,
+            )
 
             return jsonify({"message": "Email sent successfully!"}), 200
 
@@ -440,25 +411,3 @@ class EmailController:
             </body>
             </html>
             """
-
-    @staticmethod
-    def _send_email(msg, sender_email, sender_password):
-        """Send email with SSL/TLS"""
-        context = ssl.create_default_context()
-
-        try:
-            # Try SSL first (port 465)
-            server = smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context)
-            print("Connected using SSL on port 465")
-        except Exception as e:
-            print(f"SSL connection failed, trying STARTTLS: {e}")
-            # Fallback to STARTTLS (port 587)
-            server = smtplib.SMTP("smtp.gmail.com", 587)
-            server.starttls(context=context)
-            print("Connected using STARTTLS on port 587")
-
-        server.login(sender_email, sender_password)
-        print("Login successful!")
-        server.send_message(msg)
-        server.quit()
-        print("Email sent successfully!")

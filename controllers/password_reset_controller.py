@@ -1,11 +1,7 @@
 from flask import request, jsonify
 from models import db, User, PasswordReset
 from werkzeug.security import generate_password_hash
-import smtplib
-import ssl
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from config import Config
+from utils.email_sender import send_email
 
 
 class PasswordResetController:
@@ -51,35 +47,16 @@ class PasswordResetController:
     @staticmethod
     def _send_otp_email(email, otp):
         """
-        Actually sends the OTP email over SMTP.
+        Actually sends the OTP email via Resend's HTTPS API.
         Raises an exception on failure so callers can decide how to respond.
         Used by both send_otp() and resend_otp() — keeping this in one place
         means resend can never again silently forget to send the email.
         """
-        sender_email = Config.EMAIL_SENDER
-        sender_password = Config.EMAIL_PASSWORD
-
-        if not sender_email or not sender_password:
-            raise Exception("Email configuration missing")
-
-        msg = MIMEMultipart()
-        msg["From"] = sender_email
-        msg["To"] = email
-        msg["Subject"] = "Password Reset OTP - Gleamwave"
-        msg.attach(MIMEText(PasswordResetController._build_otp_email_body(otp), "html"))
-
-        context = ssl.create_default_context()
-
-        try:
-            server = smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context)
-        except Exception:
-            server = smtplib.SMTP("smtp.gmail.com", 587)
-            server.starttls(context=context)
-
-        server.login(sender_email, sender_password)
-        server.send_message(msg)
-        server.quit()
-
+        send_email(
+            to_email=email,
+            subject="Password Reset OTP - Gleamwave",
+            html_body=PasswordResetController._build_otp_email_body(otp),
+        )
         print(f"OTP email sent to {email}")
 
     @staticmethod
