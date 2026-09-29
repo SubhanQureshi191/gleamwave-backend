@@ -2,12 +2,42 @@ from flask import request, jsonify, send_file
 from models import db, Order, OrderItem, CartItem, Product, ProductVariant, User
 from controllers.email_controller import EmailController
 from utils.invoice_generator import InvoiceGenerator
+from utils.supabase_client import upload_image
 import threading
 import traceback
+import time
 import os
 
 
 class OrderController:
+
+    @staticmethod
+    def upload_advance_screenshot():
+        """
+        Upload a customer's advance-payment screenshot BEFORE the order is
+        created. Used by both guest and logged-in checkout — no auth
+        required, since guests must be able to use this too.
+        Returns the public URL to attach to the order on submission.
+        """
+        try:
+            if "screenshot" not in request.files:
+                return jsonify({"error": "No screenshot file provided"}), 400
+
+            file = request.files["screenshot"]
+            if not file or file.filename == "":
+                return jsonify({"error": "No screenshot file provided"}), 400
+
+            product_id = request.form.get("product_id", "unknown")
+            # unique-ish identifier so screenshots never overwrite each other
+            unique_marker = int(time.time() * 1000)
+            url = upload_image(file, f"advance-{product_id}", unique_marker)
+
+            return jsonify({"url": url}), 200
+
+        except Exception as e:
+            print(f"Advance screenshot upload error: {e}")
+            print(traceback.format_exc())
+            return jsonify({"error": str(e)}), 500
 
     @staticmethod
     def create_order(user_id):
@@ -21,6 +51,16 @@ class OrderController:
         user = User.query.get(user_id)
         if not user:
             return jsonify({"error": "User not found"}), 404
+
+        # ─── VALIDATE ADVANCE PAYMENT SCREENSHOTS (before any mutation) ───
+        # Frontend sends: { "advance_screenshots": { "<cart_item_id>": "<url>", ... } }
+        advance_screenshots = data.get("advance_screenshots", {}) or {}
+        for item in items:
+            if item.product and item.product.requires_advance:
+                if not advance_screenshots.get(str(item.id)):
+                    return jsonify({
+                        "error": f"Advance payment screenshot is required for \"{item.product.name}\" before placing this order."
+                    }), 400
 
         subtotal = sum(item.product.price * item.quantity for item in items if item.product)
         delivery_charges = data.get("delivery_charges", 300)
@@ -72,6 +112,11 @@ class OrderController:
                         "error": f"Insufficient stock for {product.name}. Available: {product.stock}, Required: {item.quantity}"
                     }), 400
 
+            # ─── ADVANCE PAYMENT (snapshot at order time) ───
+            item_requires_advance = bool(item.product.requires_advance)
+            item_advance_amount = item.product.advance_amount if item_requires_advance else None
+            item_advance_screenshot = advance_screenshots.get(str(item.id)) if item_requires_advance else None
+
             # ─── SAVE COST PRICE + COLOR IN ORDER ITEM ───
             order_item = OrderItem(
                 order_id=order.id,
@@ -82,6 +127,9 @@ class OrderController:
                 price=item.product.price,
                 cost_price=item.product.cost_price or 0,
                 quantity=item.quantity,
+                advance_required=item_requires_advance,
+                advance_amount=item_advance_amount,
+                advance_screenshot_url=item_advance_screenshot,
             )
             db.session.add(order_item)
             order_items_data.append({
@@ -89,7 +137,10 @@ class OrderController:
                 "color_name": color_name,
                 "quantity": item.quantity,
                 "price": item.product.price,
-                "cost_price": item.product.cost_price or 0
+                "cost_price": item.product.cost_price or 0,
+                "advance_required": item_requires_advance,
+                "advance_amount": item_advance_amount,
+                "advance_screenshot_url": item_advance_screenshot,
             })
             db.session.delete(item)
 
@@ -422,6 +473,12 @@ class OrderController:
             variant_id = item.get("variant_id")
             color_name = None
 
+            # ─── VALIDATE ADVANCE PAYMENT SCREENSHOT (before any mutation) ───
+            if product.requires_advance and not item.get("advance_screenshot_url"):
+                return jsonify({
+                    "error": f"Advance payment screenshot is required for \"{product.name}\" before placing this order."
+                }), 400
+
             # ─── If a color was chosen, check stock on THAT color ───
             if variant_id:
                 variant = ProductVariant.query.filter_by(id=variant_id, product_id=product.id).first()
@@ -452,7 +509,10 @@ class OrderController:
                 "product_name": product.name,
                 "price": item_price,
                 "cost_price": product.cost_price or 0,
-                "quantity": quantity
+                "quantity": quantity,
+                "advance_required": product.requires_advance,
+                "advance_amount": product.advance_amount if product.requires_advance else None,
+                "advance_screenshot_url": item.get("advance_screenshot_url") if product.requires_advance else None,
             })
 
         delivery_charges = data.get("delivery_charges", 300)
@@ -488,6 +548,9 @@ class OrderController:
                 price=item_data["price"],
                 cost_price=item_data["cost_price"],
                 quantity=item_data["quantity"],
+                advance_required=item_data.get("advance_required", False),
+                advance_amount=item_data.get("advance_amount"),
+                advance_screenshot_url=item_data.get("advance_screenshot_url"),
             )
             db.session.add(order_item)
 

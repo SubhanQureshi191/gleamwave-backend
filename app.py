@@ -479,6 +479,10 @@ def upload_variant_image(variant_id):
 def delete_product_variant(variant_id):
     return ProductController.delete_variant(variant_id)
 
+@app.route("/api/orders/advance-screenshot", methods=["POST"])
+def upload_advance_screenshot():
+    return OrderController.upload_advance_screenshot()
+
 
 # ─── CREATE TABLES ──────────────────────────────────────
 with app.app_context():
