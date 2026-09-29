@@ -4,11 +4,10 @@ import requests
 RESEND_API_URL = "https://api.resend.com/emails"
 
 # ─── DEFAULT SENDER ───
-# Works without owning/verifying a domain in Resend — good enough to
-# start with. Once you buy your domain and verify it inside Resend,
-# change this to something like "Gleamwave <orders@gleamwave.com>"
-# for a more professional-looking sender address.
-DEFAULT_FROM = "Gleamwave <onboarding@resend.dev>"
+# gleamwaveresin.com is verified in Resend (SPF/DKIM/DMARC records added),
+# so emails can now go to ANY recipient — not just your own address like
+# before when we were using the unverified onboarding@resend.dev sender.
+DEFAULT_FROM = "Gleamwave <orders@gleamwaveresin.com>"
 
 
 def send_email(to_email, subject, html_body, from_email=None):
