@@ -90,6 +90,11 @@ class ProductController:
             if data.get("discount_percent"):
                 discount_percent = float(data.get("discount_percent"))
 
+            requires_advance = bool(data.get("requires_advance", False))
+            advance_amount = None
+            if requires_advance and data.get("advance_amount"):
+                advance_amount = float(data.get("advance_amount"))
+
             product = Product(
                 name=data.get("name"),
                 category=data.get("category"),
@@ -100,6 +105,8 @@ class ProductController:
                 tag=data.get("tag", "New"),
                 description=data.get("description", ""),
                 stock=int(data.get("stock", 10)),
+                requires_advance=requires_advance,
+                advance_amount=advance_amount,
             )
             db.session.add(product)
             db.session.flush()  # get product.id before commit, needed for variant rows
@@ -158,6 +165,13 @@ class ProductController:
             product.tag = data.get("tag", product.tag)
             product.description = data.get("description", product.description)
             product.stock = int(data.get("stock", product.stock))
+
+            if "requires_advance" in data:
+                product.requires_advance = bool(data.get("requires_advance"))
+                if product.requires_advance and data.get("advance_amount"):
+                    product.advance_amount = float(data.get("advance_amount"))
+                elif not product.requires_advance:
+                    product.advance_amount = None
 
             # ─── UPSERT COLOR VARIANTS ───
             # Each entry may include "id" (existing variant -> update it)

@@ -25,6 +25,9 @@ class Product(db.Model):
     description = db.Column(db.Text, default="")
     stock = db.Column(db.Integer, default=10)
 
+    requires_advance = db.Column(db.Boolean, default=False)
+    advance_amount = db.Column(db.Float, nullable=True)
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -40,6 +43,8 @@ class Product(db.Model):
             "tag": self.tag,
             "description": self.description,
             "stock": self.stock,
+            "requires_advance": self.requires_advance or False,
+            "advance_amount": self.advance_amount,
             # Calculated fields
             "profit_per_unit": (self.price or 0) - (self.cost_price or 0),
             "profit_margin": round(((self.price or 0) - (self.cost_price or 0)) / (self.price or 1) * 100, 2) if self.price else 0,

@@ -6,12 +6,17 @@ class OrderItem(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     order_id = db.Column(db.Integer, db.ForeignKey("orders.id"), nullable=False)
     product_id = db.Column(db.Integer, db.ForeignKey("products.id"))
-    variant_id = db.Column(db.Integer, db.ForeignKey("product_variants.id"), nullable=True)  # ← NEW
-    color_name = db.Column(db.String(100), nullable=True)  # ← NEW (stored permanently, like product_name)
+    variant_id = db.Column(db.Integer, db.ForeignKey("product_variants.id"), nullable=True)
+    color_name = db.Column(db.String(100), nullable=True)
     product_name = db.Column(db.String(200))
     price = db.Column(db.Float)  # Sale price
     cost_price = db.Column(db.Float, default=0)
     quantity = db.Column(db.Integer)
+
+    # ─── ADVANCE PAYMENT (for handcrafted products that require it) ───
+    advance_required = db.Column(db.Boolean, default=False)
+    advance_amount = db.Column(db.Float, nullable=True)
+    advance_screenshot_url = db.Column(db.String(500), nullable=True)
 
     def to_dict(self):
         return {
@@ -24,4 +29,7 @@ class OrderItem(db.Model):
             "quantity": self.quantity,
             "subtotal": round(self.price * self.quantity, 2) if self.price else 0,
             "profit": round((self.price - (self.cost_price or 0)) * self.quantity, 2) if self.price else 0,
+            "advance_required": self.advance_required or False,
+            "advance_amount": self.advance_amount,
+            "advance_screenshot_url": self.advance_screenshot_url,
         }
