@@ -39,7 +39,8 @@ class InvoiceGenerator:
 
         Args:
             order: Order object
-            order_items: List of order items (dict with product_name, quantity, price)
+            order_items: List of order items (dict with product_name, quantity, price,
+                         and optionally advance_required / advance_amount)
             user: User object
 
         Returns:
@@ -247,6 +248,7 @@ class InvoiceGenerator:
 
         # Table rows
         total_amount = 0
+        total_advance_paid = 0
         for idx, item in enumerate(order_items, 1):
             item_total = item['price'] * item['quantity']
             total_amount += item_total
@@ -256,9 +258,21 @@ class InvoiceGenerator:
             if len(product_name) > 25:
                 product_name = product_name[:22] + "..."
 
+            # ─── ADVANCE PAYMENT (if this item required one) ───
+            item_advance_required = item.get('advance_required')
+            item_advance_amount = item.get('advance_amount')
+            product_name_html = product_name
+            if item_advance_required and item_advance_amount:
+                line_advance = item_advance_amount * item['quantity']
+                total_advance_paid += line_advance
+                product_name_html = (
+                    f"{product_name}<br/>"
+                    f"<font size='5' color='#B8860B'>Advance paid: Rs.{line_advance:,.0f}</font>"
+                )
+
             table_data.append([
                 Paragraph(str(idx), normal_style),
-                Paragraph(product_name, normal_style),
+                Paragraph(product_name_html, normal_style),
                 Paragraph(str(item['quantity']), normal_style),
                 Paragraph(f"Rs.{item['price']:,.0f}", normal_style),
                 Paragraph(f"Rs.{item_total:,.0f}", normal_style)
@@ -285,27 +299,49 @@ class InvoiceGenerator:
         delivery_charges = order.delivery_charges or 300
         grand_total = total_amount + delivery_charges
 
-        # Create totals table with proper alignment
+        # Build rows dynamically so the "advance paid" / "balance due" rows
+        # only appear when relevant, and the grand-total styling always
+        # lands on the right row regardless of how many rows precede it.
         totals_data = [
             ["Subtotal:", f"Rs. {total_amount:,.0f}"],
             ["Delivery:", f"Rs. {delivery_charges:,.0f}"],
-            ["GRAND TOTAL:", f"Rs. {grand_total:,.0f}"]
         ]
+        grand_total_row_index = len(totals_data)
+        totals_data.append(["GRAND TOTAL:", f"Rs. {grand_total:,.0f}"])
 
-        totals_table = Table(totals_data, colWidths=[1.8 * inch, 1.8 * inch])
-        totals_table.setStyle(TableStyle([
+        balance_due_row_index = None
+        if total_advance_paid > 0:
+            balance_due = grand_total - total_advance_paid
+            totals_data.append(["Advance Paid:", f"- Rs. {total_advance_paid:,.0f}"])
+            balance_due_row_index = len(totals_data)
+            totals_data.append(["Balance Due:", f"Rs. {balance_due:,.0f}"])
+
+        totals_table_style = [
             ('ALIGN', (0, 0), (0, -1), 'RIGHT'),
             ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
             ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
             ('FONTSIZE', (0, 0), (-1, -1), 7),
             ('TOPPADDING', (0, 0), (-1, -1), 2),
             ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
-            ('LINEABOVE', (0, 2), (-1, 2), 1.5, colors.HexColor('#4A2E22')),
-            ('LINEBELOW', (0, 2), (-1, 2), 1.5, colors.HexColor('#4A2E22')),
-            ('TEXTCOLOR', (0, 2), (-1, 2), colors.HexColor('#4A2E22')),
-            ('FONTSIZE', (0, 2), (-1, 2), 10),
-            ('FONTNAME', (0, 2), (-1, 2), 'Helvetica-Bold'),
-        ]))
+            ('LINEABOVE', (0, grand_total_row_index), (-1, grand_total_row_index), 1.5, colors.HexColor('#4A2E22')),
+            ('LINEBELOW', (0, grand_total_row_index), (-1, grand_total_row_index), 1.5, colors.HexColor('#4A2E22')),
+            ('TEXTCOLOR', (0, grand_total_row_index), (-1, grand_total_row_index), colors.HexColor('#4A2E22')),
+            ('FONTSIZE', (0, grand_total_row_index), (-1, grand_total_row_index), 10),
+            ('FONTNAME', (0, grand_total_row_index), (-1, grand_total_row_index), 'Helvetica-Bold'),
+        ]
+
+        if balance_due_row_index is not None:
+            advance_row_index = balance_due_row_index - 1
+            totals_table_style.extend([
+                ('TEXTCOLOR', (0, advance_row_index), (-1, advance_row_index), colors.HexColor('#B8860B')),
+                ('LINEABOVE', (0, balance_due_row_index), (-1, balance_due_row_index), 0.75, colors.HexColor('#E8D9C0')),
+                ('TEXTCOLOR', (0, balance_due_row_index), (-1, balance_due_row_index), colors.HexColor('#4A2E22')),
+                ('FONTSIZE', (0, balance_due_row_index), (-1, balance_due_row_index), 8),
+                ('FONTNAME', (0, balance_due_row_index), (-1, balance_due_row_index), 'Helvetica-Bold'),
+            ])
+
+        totals_table = Table(totals_data, colWidths=[1.8 * inch, 1.8 * inch])
+        totals_table.setStyle(TableStyle(totals_table_style))
 
         # Right align the totals table
         totals_container = Table([[totals_table]], colWidths=[5.0 * inch])

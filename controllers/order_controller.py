@@ -298,7 +298,9 @@ class OrderController:
                     "color_name": item.color_name,
                     "quantity": item.quantity,
                     "price": item.price,
-                    "cost_price": item.cost_price or 0
+                    "cost_price": item.cost_price or 0,
+                    "advance_required": item.advance_required or False,
+                    "advance_amount": item.advance_amount,
                 } for item in order_items]
 
                 invoice_path = InvoiceGenerator.generate_invoice(order, order_items_data, user)
@@ -415,6 +417,8 @@ class OrderController:
                     "quantity": item.quantity,
                     "price": item.price,
                     "cost_price": item.cost_price or 0,
+                    "advance_required": item.advance_required or False,
+                    "advance_amount": item.advance_amount,
                 } for item in order_items]
 
                 if order.user_id:
@@ -508,7 +512,9 @@ class OrderController:
                     "color_name": item.color_name,
                     "quantity": item.quantity,
                     "price": item.price,
-                    "cost_price": item.cost_price or 0
+                    "cost_price": item.cost_price or 0,
+                    "advance_required": item.advance_required or False,
+                    "advance_amount": item.advance_amount,
                 } for item in order_items]
 
                 # Generate/update invoice with new status
