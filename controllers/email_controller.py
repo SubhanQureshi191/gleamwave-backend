@@ -45,9 +45,15 @@ class EmailController:
                 quantity = item.get("quantity", 1)
                 price = item.get("price", item.get("product", {}).get("price", 0))
                 subtotal_item = price * quantity
+
+                advance_note = ""
+                if item.get("advance_required") and item.get("advance_amount"):
+                    line_advance = item["advance_amount"] * quantity
+                    advance_note = f'<div style="font-size: 11px; color: #B8860B; margin-top: 2px;">Advance paid: Rs. {line_advance:,.0f}</div>'
+
                 items_html += f"""
                     <tr>
-                        <td style="padding: 10px; border-bottom: 1px solid #E8D5BF; font-family: Georgia, serif;">{product_name}</td>
+                        <td style="padding: 10px; border-bottom: 1px solid #E8D5BF; font-family: Georgia, serif;">{product_name}{advance_note}</td>
                         <td style="padding: 10px; border-bottom: 1px solid #E8D5BF; text-align: center; font-family: Georgia, serif;">{quantity}</td>
                         <td style="padding: 10px; border-bottom: 1px solid #E8D5BF; text-align: right; font-family: Georgia, serif;">Rs. {price:,.0f}</td>
                         <td style="padding: 10px; border-bottom: 1px solid #E8D5BF; text-align: right; font-family: Georgia, serif;">Rs. {subtotal_item:,.0f}</td>
@@ -70,6 +76,12 @@ class EmailController:
                     </div>
                 """
 
+            total_advance_paid = sum(
+                (item.get("advance_amount") or 0) * item.get("quantity", 1)
+                for item in items
+                if item.get("advance_required")
+            )
+
             body = EmailController._build_email_body(
                 name=name,
                 order_id=order_id,
@@ -82,7 +94,8 @@ class EmailController:
                 payment_method=payment_method,
                 extra_note=extra_note,
                 order_date=order_date,
-                is_confirmation=True
+                is_confirmation=True,
+                total_advance_paid=total_advance_paid,
             )
 
             send_email(
@@ -146,14 +159,26 @@ class EmailController:
                 quantity = item.get("quantity", 1)
                 price = item.get("price", item.get("product", {}).get("price", 0))
                 subtotal_item = price * quantity
+
+                advance_note = ""
+                if item.get("advance_required") and item.get("advance_amount"):
+                    line_advance = item["advance_amount"] * quantity
+                    advance_note = f'<div style="font-size: 11px; color: #B8860B; margin-top: 2px;">Advance paid: Rs. {line_advance:,.0f}</div>'
+
                 items_html += f"""
                     <tr>
-                        <td style="padding: 10px; border-bottom: 1px solid #E8D5BF; font-family: Georgia, serif;">{product_name}</td>
+                        <td style="padding: 10px; border-bottom: 1px solid #E8D5BF; font-family: Georgia, serif;">{product_name}{advance_note}</td>
                         <td style="padding: 10px; border-bottom: 1px solid #E8D5BF; text-align: center; font-family: Georgia, serif;">{quantity}</td>
                         <td style="padding: 10px; border-bottom: 1px solid #E8D5BF; text-align: right; font-family: Georgia, serif;">Rs. {price:,.0f}</td>
                         <td style="padding: 10px; border-bottom: 1px solid #E8D5BF; text-align: right; font-family: Georgia, serif;">Rs. {subtotal_item:,.0f}</td>
                     </tr>
                     """
+
+            total_advance_paid = sum(
+                (item.get("advance_amount") or 0) * item.get("quantity", 1)
+                for item in items
+                if item.get("advance_required")
+            )
 
             body = EmailController._build_email_body(
                 name=name,
@@ -168,7 +193,8 @@ class EmailController:
                 extra_note=extra_note,
                 order_date="",
                 is_confirmation=False,
-                status_message=message
+                status_message=message,
+                total_advance_paid=total_advance_paid,
             )
 
             send_email(
@@ -266,7 +292,8 @@ class EmailController:
     @staticmethod
     def _build_email_body(name, order_id, status, subtotal, delivery_charges, total,
                           items_html, shipping_html, payment_method, extra_note,
-                          order_date, is_confirmation=True, status_message=""):
+                          order_date, is_confirmation=True, status_message="",
+                          total_advance_paid=0):
         """Build the email HTML body without emojis"""
 
         if is_confirmation:
@@ -363,6 +390,24 @@ class EmailController:
                                         Rs. {total:,.0f}
                                     </td>
                                 </tr>
+                                {f'''
+                                <tr>
+                                    <td colspan="3" style="padding: 6px 12px; text-align: right; color: #B8860B;">
+                                        Advance Paid
+                                    </td>
+                                    <td style="padding: 6px 12px; text-align: right; color: #B8860B;">
+                                        - Rs. {total_advance_paid:,.0f}
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td colspan="3" style="padding: 10px 12px; text-align: right; font-size: 15px; font-weight: 700; color: #4A2E22; border-top: 1px solid #E8D9C0;">
+                                        Balance Due
+                                    </td>
+                                    <td style="padding: 10px 12px; text-align: right; font-size: 15px; font-weight: 700; color: #4A2E22; border-top: 1px solid #E8D9C0;">
+                                        Rs. {total - total_advance_paid:,.0f}
+                                    </td>
+                                </tr>
+                                ''' if total_advance_paid > 0 else ''}
                             </tfoot>
                         </table>
 
