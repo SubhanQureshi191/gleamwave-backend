@@ -1,3 +1,4 @@
+import json
 from models import db
 
 class OrderItem(db.Model):
@@ -16,9 +17,18 @@ class OrderItem(db.Model):
     # ─── ADVANCE PAYMENT (for handcrafted products that require it) ───
     advance_required = db.Column(db.Boolean, default=False)
     advance_amount = db.Column(db.Float, nullable=True)
-    advance_screenshot_url = db.Column(db.String(500), nullable=True)
+    # Stored as a JSON-encoded list of URLs, e.g. '["url1", "url2"]',
+    # since a customer may attach more than one screenshot.
+    advance_screenshot_urls = db.Column(db.Text, nullable=True)
 
     def to_dict(self):
+        screenshots = []
+        if self.advance_screenshot_urls:
+            try:
+                screenshots = json.loads(self.advance_screenshot_urls)
+            except (ValueError, TypeError):
+                screenshots = []
+
         return {
             "product_id": self.product_id,
             "variant_id": self.variant_id,
@@ -31,5 +41,5 @@ class OrderItem(db.Model):
             "profit": round((self.price - (self.cost_price or 0)) * self.quantity, 2) if self.price else 0,
             "advance_required": self.advance_required or False,
             "advance_amount": self.advance_amount,
-            "advance_screenshot_url": self.advance_screenshot_url,
+            "advance_screenshot_urls": screenshots,
         }

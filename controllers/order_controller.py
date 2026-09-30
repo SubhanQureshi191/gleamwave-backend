@@ -6,6 +6,7 @@ from utils.supabase_client import upload_image
 import threading
 import traceback
 import time
+import json
 import os
 
 
@@ -53,25 +54,31 @@ class OrderController:
             return jsonify({"error": "User not found"}), 404
 
         # ─── VALIDATE ADVANCE PAYMENT SCREENSHOTS (before any mutation) ───
-        # Frontend sends: { "advance_screenshots": { "<cart_item_id>": "<url>", ... } }
+        # Frontend sends: { "advance_screenshots": { "<cart_item_id>": ["<url>", ...] } }
         advance_screenshots = data.get("advance_screenshots", {}) or {}
         for item in items:
             if item.product and item.product.requires_advance:
-                if not advance_screenshots.get(str(item.id)):
+                urls = advance_screenshots.get(str(item.id)) or []
+                if not urls:
                     return jsonify({
-                        "error": f"Advance payment screenshot is required for \"{item.product.name}\" before placing this order."
+                        "error": f"At least one advance payment screenshot is required for \"{item.product.name}\" before placing this order."
                     }), 400
 
         subtotal = sum(item.product.price * item.quantity for item in items if item.product)
         delivery_charges = data.get("delivery_charges", 300)
         total = subtotal + delivery_charges
 
+        # If any cart item requires advance payment, the order is held for
+        # manual admin approval instead of auto-confirming. The confirmation
+        # email is sent later, only once the admin approves it.
+        needs_admin_approval = any(item.product and item.product.requires_advance for item in items)
+
         order = Order(
             user_id=user_id,
             total_amount=round(total, 2),
             subtotal=round(subtotal, 2),
             delivery_charges=round(delivery_charges, 2),
-            status="confirmed",
+            status="pending" if needs_admin_approval else "confirmed",
             shipping_name=data.get("shipping_name"),
             shipping_phone=data.get("shipping_phone"),
             shipping_address=data.get("shipping_address"),
@@ -115,7 +122,7 @@ class OrderController:
             # ─── ADVANCE PAYMENT (snapshot at order time) ───
             item_requires_advance = bool(item.product.requires_advance)
             item_advance_amount = item.product.advance_amount if item_requires_advance else None
-            item_advance_screenshot = advance_screenshots.get(str(item.id)) if item_requires_advance else None
+            item_advance_urls = advance_screenshots.get(str(item.id)) if item_requires_advance else None
 
             # ─── SAVE COST PRICE + COLOR IN ORDER ITEM ───
             order_item = OrderItem(
@@ -129,7 +136,7 @@ class OrderController:
                 quantity=item.quantity,
                 advance_required=item_requires_advance,
                 advance_amount=item_advance_amount,
-                advance_screenshot_url=item_advance_screenshot,
+                advance_screenshot_urls=json.dumps(item_advance_urls) if item_advance_urls else None,
             )
             db.session.add(order_item)
             order_items_data.append({
@@ -140,69 +147,78 @@ class OrderController:
                 "cost_price": item.product.cost_price or 0,
                 "advance_required": item_requires_advance,
                 "advance_amount": item_advance_amount,
-                "advance_screenshot_url": item_advance_screenshot,
+                "advance_screenshot_urls": item_advance_urls or [],
             })
             db.session.delete(item)
 
         db.session.commit()
 
-        # ─── GENERATE INVOICE ───
         invoice_path = None
-        try:
-            invoice_path = InvoiceGenerator.generate_invoice(order, order_items_data, user)
-            print(f"Invoice generated: {invoice_path}")
-        except Exception as e:
-            print(f"Invoice generation error: {e}")
-            print(traceback.format_exc())
 
-        # ─── SEND ORDER CONFIRMATION EMAIL ───
-        try:
-            email_data = {
-                "email": user.email,
-                "name": order.shipping_name or user.name,
-                "order_id": order.id,
-                "status": "confirmed",
-                "subtotal": subtotal,
-                "delivery_charges": delivery_charges,
-                "total": total,
-                "items": order_items_data,
-                "payment_method": order.payment_method,
-                "extra_note": order.extra_note or "",
-                "shipping_address": {
-                    "full_name": order.shipping_name or user.name,
-                    "street": order.shipping_address or "",
-                    "city": data.get("city", ""),
-                    "zip_code": data.get("postalCode", ""),
-                    "country": "Pakistan",
-                    "phone": order.shipping_phone or user.phone or ""
-                },
-                "order_date": order.created_at.strftime("%Y-%m-%d %H:%M") if order.created_at else "",
-                "invoice_path": invoice_path
-            }
+        if needs_admin_approval:
+            # ─── HELD FOR ADMIN APPROVAL ───
+            # No invoice, no confirmation email yet — these happen once an
+            # admin reviews the advance-payment screenshot(s) and approves
+            # the order (see update_status()).
+            print(f"Order #{order.id} held pending admin approval (advance payment items)")
+        else:
+            # ─── GENERATE INVOICE ───
+            try:
+                invoice_path = InvoiceGenerator.generate_invoice(order, order_items_data, user)
+                print(f"Invoice generated: {invoice_path}")
+            except Exception as e:
+                print(f"Invoice generation error: {e}")
+                print(traceback.format_exc())
 
-            def send_email_async():
-                try:
-                    from app import app
-                    with app.app_context():
-                        result = EmailController.send_order_confirmation_email(email_data)
-                        print(f"Order confirmation email result: {result}")
-                except Exception as e:
-                    print(f"Background email error: {e}")
-                    print(traceback.format_exc())
+            # ─── SEND ORDER CONFIRMATION EMAIL ───
+            try:
+                email_data = {
+                    "email": user.email,
+                    "name": order.shipping_name or user.name,
+                    "order_id": order.id,
+                    "status": "confirmed",
+                    "subtotal": subtotal,
+                    "delivery_charges": delivery_charges,
+                    "total": total,
+                    "items": order_items_data,
+                    "payment_method": order.payment_method,
+                    "extra_note": order.extra_note or "",
+                    "shipping_address": {
+                        "full_name": order.shipping_name or user.name,
+                        "street": order.shipping_address or "",
+                        "city": data.get("city", ""),
+                        "zip_code": data.get("postalCode", ""),
+                        "country": "Pakistan",
+                        "phone": order.shipping_phone or user.phone or ""
+                    },
+                    "order_date": order.created_at.strftime("%Y-%m-%d %H:%M") if order.created_at else "",
+                    "invoice_path": invoice_path
+                }
 
-            thread = threading.Thread(target=send_email_async)
-            thread.daemon = True
-            thread.start()
-            print(f"Order confirmation email queued for order #{order.id} to {user.email}")
+                def send_email_async():
+                    try:
+                        from app import app
+                        with app.app_context():
+                            result = EmailController.send_order_confirmation_email(email_data)
+                            print(f"Order confirmation email result: {result}")
+                    except Exception as e:
+                        print(f"Background email error: {e}")
+                        print(traceback.format_exc())
 
-        except Exception as e:
-            print(f"Failed to queue email: {e}")
-            print(traceback.format_exc())
+                thread = threading.Thread(target=send_email_async)
+                thread.daemon = True
+                thread.start()
+                print(f"Order confirmation email queued for order #{order.id} to {user.email}")
+
+            except Exception as e:
+                print(f"Failed to queue email: {e}")
+                print(traceback.format_exc())
 
         order_dict = order.to_dict()
         order_dict['user_email'] = user.email
         order_dict['items'] = order_items_data
         order_dict['invoice_path'] = invoice_path
+        order_dict['needs_admin_approval'] = needs_admin_approval
 
         return jsonify(order_dict), 201
 
@@ -330,12 +346,14 @@ class OrderController:
         new_status = data.get("status")
         old_status = order.status
 
-        # Get user email
+        # Get user email (works for both logged-in users and guest orders)
         user_email = None
         if order.user_id:
             user = User.query.get(order.user_id)
             if user:
                 user_email = user.email
+        else:
+            user_email = order.guest_email
 
         order_items = OrderItem.query.filter_by(order_id=order_id).all()
 
@@ -384,6 +402,70 @@ class OrderController:
             except Exception as e:
                 db.session.rollback()
                 return jsonify({"error": str(e)}), 500
+
+        # If order is being approved from "pending" (this is the advance-payment
+        # approval step) — this is the FIRST time this order gets its real
+        # confirmation email + invoice, since both were deliberately skipped
+        # when the order was created.
+        elif new_status == "confirmed" and old_status == "pending":
+            try:
+                order_items_data = [{
+                    "product_name": item.product_name,
+                    "color_name": item.color_name,
+                    "quantity": item.quantity,
+                    "price": item.price,
+                    "cost_price": item.cost_price or 0,
+                } for item in order_items]
+
+                if order.user_id:
+                    invoice_user = User.query.get(order.user_id)
+                else:
+                    class GuestUser:
+                        def __init__(self, email, name, phone):
+                            self.email = email
+                            self.name = name
+                            self.phone = phone
+                    invoice_user = GuestUser(
+                        email=order.guest_email,
+                        name=order.shipping_name,
+                        phone=order.shipping_phone,
+                    )
+
+                approval_invoice_path = None
+                try:
+                    approval_invoice_path = InvoiceGenerator.generate_invoice(order, order_items_data, invoice_user)
+                    print(f"Invoice generated on approval: {approval_invoice_path}")
+                except Exception as e:
+                    print(f"Invoice generation error on approval: {e}")
+
+                if user_email:
+                    email_data = {
+                        "email": user_email,
+                        "name": order.shipping_name,
+                        "order_id": order.id,
+                        "status": "confirmed",
+                        "subtotal": order.subtotal,
+                        "delivery_charges": order.delivery_charges,
+                        "total": order.total_amount,
+                        "items": order_items_data,
+                        "payment_method": order.payment_method,
+                        "extra_note": order.extra_note or "",
+                        "shipping_address": {
+                            "full_name": order.shipping_name,
+                            "street": order.shipping_address or "",
+                            "city": "",
+                            "zip_code": "",
+                            "country": "Pakistan",
+                            "phone": order.shipping_phone or "",
+                        },
+                        "order_date": order.created_at.strftime("%Y-%m-%d %H:%M") if order.created_at else "",
+                        "invoice_path": approval_invoice_path,
+                    }
+                    EmailController.send_order_confirmation_email(email_data)
+                    print(f"Approval confirmation email sent to {user_email}")
+            except Exception as e:
+                print(f"Approval email/invoice error: {e}")
+                print(traceback.format_exc())
 
         # If order is being shipped or delivered - send notification
         elif new_status in ["shipped", "delivered"] and old_status != new_status:
@@ -473,10 +555,10 @@ class OrderController:
             variant_id = item.get("variant_id")
             color_name = None
 
-            # ─── VALIDATE ADVANCE PAYMENT SCREENSHOT (before any mutation) ───
-            if product.requires_advance and not item.get("advance_screenshot_url"):
+            # ─── VALIDATE ADVANCE PAYMENT SCREENSHOTS (before any mutation) ───
+            if product.requires_advance and not (item.get("advance_screenshot_urls") or []):
                 return jsonify({
-                    "error": f"Advance payment screenshot is required for \"{product.name}\" before placing this order."
+                    "error": f"At least one advance payment screenshot is required for \"{product.name}\" before placing this order."
                 }), 400
 
             # ─── If a color was chosen, check stock on THAT color ───
@@ -512,11 +594,16 @@ class OrderController:
                 "quantity": quantity,
                 "advance_required": product.requires_advance,
                 "advance_amount": product.advance_amount if product.requires_advance else None,
-                "advance_screenshot_url": item.get("advance_screenshot_url") if product.requires_advance else None,
+                "advance_screenshot_urls": (item.get("advance_screenshot_urls") or []) if product.requires_advance else [],
             })
 
         delivery_charges = data.get("delivery_charges", 300)
         total = subtotal + delivery_charges
+
+        # If any item requires advance payment, hold this order for manual
+        # admin approval instead of auto-confirming (see note near the
+        # bottom of this function).
+        needs_admin_approval = any(i.get("advance_required") for i in order_items_data)
 
         # ─── CREATE ORDER ───
         order = Order(
@@ -526,7 +613,7 @@ class OrderController:
             total_amount=round(total, 2),
             subtotal=round(subtotal, 2),
             delivery_charges=round(delivery_charges, 2),
-            status="confirmed",
+            status="pending" if needs_admin_approval else "confirmed",
             shipping_name=data.get("shipping_name"),
             shipping_phone=data.get("shipping_phone"),
             shipping_address=data.get("shipping_address"),
@@ -550,7 +637,7 @@ class OrderController:
                 quantity=item_data["quantity"],
                 advance_required=item_data.get("advance_required", False),
                 advance_amount=item_data.get("advance_amount"),
-                advance_screenshot_url=item_data.get("advance_screenshot_url"),
+                advance_screenshot_urls=json.dumps(item_data["advance_screenshot_urls"]) if item_data.get("advance_screenshot_urls") else None,
             )
             db.session.add(order_item)
 
@@ -562,76 +649,85 @@ class OrderController:
 
         db.session.commit()
 
-        # ─── GENERATE INVOICE ───
         invoice_path = None
-        try:
-            # Create a temporary user-like object for invoice
-            class GuestUser:
-                def __init__(self, email, name, phone):
-                    self.email = email
-                    self.name = name
-                    self.phone = phone
 
-            guest_user = GuestUser(
-                email=guest_email,
-                name=data.get("shipping_name"),
-                phone=data.get("shipping_phone")
-            )
+        if needs_admin_approval:
+            # ─── HELD FOR ADMIN APPROVAL ───
+            # No invoice, no confirmation email yet — sent later once an
+            # admin reviews the advance-payment screenshot(s) and approves
+            # the order (see update_status()).
+            print(f"Guest order #{order.id} held pending admin approval (advance payment items)")
+        else:
+            # ─── GENERATE INVOICE ───
+            try:
+                # Create a temporary user-like object for invoice
+                class GuestUser:
+                    def __init__(self, email, name, phone):
+                        self.email = email
+                        self.name = name
+                        self.phone = phone
 
-            invoice_path = InvoiceGenerator.generate_invoice(order, order_items_data, guest_user)
-            print(f"Guest invoice generated: {invoice_path}")
-        except Exception as e:
-            print(f"Guest invoice generation error: {e}")
-            print(traceback.format_exc())
+                guest_user = GuestUser(
+                    email=guest_email,
+                    name=data.get("shipping_name"),
+                    phone=data.get("shipping_phone")
+                )
 
-        # ─── SEND ORDER CONFIRMATION EMAIL ───
-        try:
-            email_data = {
-                "email": guest_email,
-                "name": order.shipping_name,
-                "order_id": order.id,
-                "status": "confirmed",
-                "subtotal": subtotal,
-                "delivery_charges": delivery_charges,
-                "total": total,
-                "items": order_items_data,
-                "payment_method": order.payment_method,
-                "extra_note": order.extra_note or "",
-                "shipping_address": {
-                    "full_name": order.shipping_name,
-                    "street": order.shipping_address or "",
-                    "city": data.get("city", ""),
-                    "zip_code": data.get("postalCode", ""),
-                    "country": "Pakistan",
-                    "phone": order.shipping_phone or ""
-                },
-                "order_date": order.created_at.strftime("%Y-%m-%d %H:%M") if order.created_at else "",
-                "invoice_path": invoice_path
-            }
+                invoice_path = InvoiceGenerator.generate_invoice(order, order_items_data, guest_user)
+                print(f"Guest invoice generated: {invoice_path}")
+            except Exception as e:
+                print(f"Guest invoice generation error: {e}")
+                print(traceback.format_exc())
 
-            def send_email_async():
-                try:
-                    from app import app
-                    with app.app_context():
-                        result = EmailController.send_order_confirmation_email(email_data)
-                        print(f"Guest order confirmation email result: {result}")
-                except Exception as e:
-                    print(f"Background email error: {e}")
-                    print(traceback.format_exc())
+            # ─── SEND ORDER CONFIRMATION EMAIL ───
+            try:
+                email_data = {
+                    "email": guest_email,
+                    "name": order.shipping_name,
+                    "order_id": order.id,
+                    "status": "confirmed",
+                    "subtotal": subtotal,
+                    "delivery_charges": delivery_charges,
+                    "total": total,
+                    "items": order_items_data,
+                    "payment_method": order.payment_method,
+                    "extra_note": order.extra_note or "",
+                    "shipping_address": {
+                        "full_name": order.shipping_name,
+                        "street": order.shipping_address or "",
+                        "city": data.get("city", ""),
+                        "zip_code": data.get("postalCode", ""),
+                        "country": "Pakistan",
+                        "phone": order.shipping_phone or ""
+                    },
+                    "order_date": order.created_at.strftime("%Y-%m-%d %H:%M") if order.created_at else "",
+                    "invoice_path": invoice_path
+                }
 
-            thread = threading.Thread(target=send_email_async)
-            thread.daemon = True
-            thread.start()
-            print(f"Guest order confirmation email queued for #{order.id} to {guest_email}")
+                def send_email_async():
+                    try:
+                        from app import app
+                        with app.app_context():
+                            result = EmailController.send_order_confirmation_email(email_data)
+                            print(f"Guest order confirmation email result: {result}")
+                    except Exception as e:
+                        print(f"Background email error: {e}")
+                        print(traceback.format_exc())
 
-        except Exception as e:
-            print(f"Failed to queue email: {e}")
-            print(traceback.format_exc())
+                thread = threading.Thread(target=send_email_async)
+                thread.daemon = True
+                thread.start()
+                print(f"Guest order confirmation email queued for #{order.id} to {guest_email}")
+
+            except Exception as e:
+                print(f"Failed to queue email: {e}")
+                print(traceback.format_exc())
 
         # ─── RETURN ORDER ───
         order_dict = order.to_dict()
         order_dict['items'] = order_items_data
         order_dict['invoice_path'] = invoice_path
+        order_dict['needs_admin_approval'] = needs_admin_approval
 
         return jsonify(order_dict), 201
 
