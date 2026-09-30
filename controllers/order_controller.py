@@ -214,6 +214,31 @@ class OrderController:
                 print(f"Failed to queue email: {e}")
                 print(traceback.format_exc())
 
+        # ─── NOTIFY ADMIN OF NEW ORDER (always, regardless of approval status) ───
+        try:
+            admin_notify_data = {
+                "order_id": order.id,
+                "name": order.shipping_name or user.name,
+                "email": user.email,
+                "phone": order.shipping_phone or user.phone or "",
+                "total": total,
+                "status": order.status,
+                "items": order_items_data,
+                "needs_admin_approval": needs_admin_approval,
+            }
+
+            def notify_admin_async():
+                try:
+                    from app import app
+                    with app.app_context():
+                        EmailController.send_admin_new_order_notification(admin_notify_data)
+                except Exception as e:
+                    print(f"Admin notification thread error: {e}")
+
+            threading.Thread(target=notify_admin_async, daemon=True).start()
+        except Exception as e:
+            print(f"Failed to queue admin notification: {e}")
+
         order_dict = order.to_dict()
         order_dict['user_email'] = user.email
         order_dict['items'] = order_items_data
@@ -728,6 +753,31 @@ class OrderController:
             except Exception as e:
                 print(f"Failed to queue email: {e}")
                 print(traceback.format_exc())
+
+        # ─── NOTIFY ADMIN OF NEW ORDER (always, regardless of approval status) ───
+        try:
+            admin_notify_data = {
+                "order_id": order.id,
+                "name": order.shipping_name,
+                "email": guest_email,
+                "phone": order.shipping_phone or "",
+                "total": total,
+                "status": order.status,
+                "items": order_items_data,
+                "needs_admin_approval": needs_admin_approval,
+            }
+
+            def notify_admin_async():
+                try:
+                    from app import app
+                    with app.app_context():
+                        EmailController.send_admin_new_order_notification(admin_notify_data)
+                except Exception as e:
+                    print(f"Admin notification thread error: {e}")
+
+            threading.Thread(target=notify_admin_async, daemon=True).start()
+        except Exception as e:
+            print(f"Failed to queue admin notification: {e}")
 
         # ─── RETURN ORDER ───
         order_dict = order.to_dict()

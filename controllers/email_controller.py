@@ -7,6 +7,96 @@ import traceback
 class EmailController:
 
     @staticmethod
+    def send_admin_new_order_notification(data):
+        """
+        Notify the store owner (Config.EMAIL_RECEIVER) that a new order came
+        in. Sent for EVERY order — whether it auto-confirmed or is waiting
+        for advance-payment approval — separate from the customer's own
+        confirmation email.
+        """
+        try:
+            order_id = data.get("order_id")
+            name = data.get("name", "Customer")
+            customer_email = data.get("email", "N/A")
+            phone = data.get("phone", "N/A")
+            total = data.get("total", 0)
+            status = data.get("status", "confirmed")
+            items = data.get("items", [])
+            needs_approval = data.get("needs_admin_approval", False)
+
+            items_html = ""
+            for item in items:
+                product_name = item.get("product_name", "Product")
+                color_name = item.get("color_name")
+                if color_name:
+                    product_name = f"{product_name} ({color_name})"
+                quantity = item.get("quantity", 1)
+                price = item.get("price", 0)
+
+                advance_note = ""
+                if item.get("advance_required"):
+                    line_advance = (item.get("advance_amount") or 0) * quantity
+                    advance_note = f' — <span style="color:#B8860B;">Advance: Rs. {line_advance:,.0f}</span>'
+
+                items_html += f"""
+                    <li style="margin-bottom: 6px;">{product_name} &times; {quantity} — Rs. {price * quantity:,.0f}{advance_note}</li>
+                """
+
+            approval_banner = ""
+            if needs_approval:
+                approval_banner = """
+                    <div style="background-color: #FEF3C7; border: 2px solid #F5C453; border-radius: 8px; padding: 12px 16px; margin: 16px 0 20px; color: #92400E; font-size: 14px; line-height: 1.5;">
+                        <strong>Action needed:</strong> This order includes an advance-payment item and is waiting in your admin panel for approval before the customer receives their confirmation email.
+                    </div>
+                """
+
+            body = f"""
+                <!DOCTYPE html>
+                <html>
+                <body style="margin:0; padding:0; font-family: Georgia, 'Times New Roman', serif; background-color:#FDF8F3;">
+                    <div style="max-width: 520px; margin: 0 auto; padding: 32px 24px; background-color:#FFFFFF;">
+                        <div style="text-align:center; padding-bottom: 16px; border-bottom: 3px solid #B8956A; margin-bottom: 20px;">
+                            <div style="font-size: 22px; font-weight: 700; color: #6F4E37; letter-spacing: 1px;">gleamwave</div>
+                            <div style="font-size: 10px; color: #B8956A; text-transform: uppercase; letter-spacing: 2px; margin-top: 2px;">Admin Notification</div>
+                        </div>
+
+                        <h2 style="color:#4A2E22; margin: 0 0 4px; font-size: 20px;">New Order Received</h2>
+                        <p style="color:#6B4F3A; font-size: 15px; margin: 0 0 16px;">Order #{order_id} &middot; Rs. {total:,.0f}</p>
+
+                        {approval_banner}
+
+                        <div style="background-color:#FDF8F3; border-radius: 10px; padding: 14px 18px; margin-bottom: 16px; border: 1px solid #F5EDE0;">
+                            <p style="color:#6B4F3A; font-size: 14px; margin: 4px 0;"><strong>Customer:</strong> {name}</p>
+                            <p style="color:#6B4F3A; font-size: 14px; margin: 4px 0;"><strong>Email:</strong> {customer_email}</p>
+                            <p style="color:#6B4F3A; font-size: 14px; margin: 4px 0;"><strong>Phone:</strong> {phone}</p>
+                            <p style="color:#6B4F3A; font-size: 14px; margin: 4px 0;"><strong>Status:</strong> {status.upper()}</p>
+                        </div>
+
+                        <h3 style="color:#4A2E22; font-size: 15px; margin: 0 0 8px;">Items</h3>
+                        <ul style="color:#6B4F3A; font-size: 14px; padding-left: 20px; margin: 0 0 20px;">
+                            {items_html}
+                        </ul>
+
+                        <p style="color:#A08070; font-size: 12px; margin: 0; border-top: 2px solid #F5EDE0; padding-top: 16px;">
+                            Log in to the admin panel to view full details{" and approve this order" if needs_approval else ""}.
+                        </p>
+                    </div>
+                </body>
+                </html>
+            """
+
+            send_email(
+                to_email=Config.EMAIL_RECEIVER,
+                subject=f"New Order #{order_id} - Rs. {total:,.0f}" + (" [Needs Approval]" if needs_approval else ""),
+                html_body=body,
+            )
+            print(f"Admin new-order notification sent for order #{order_id}")
+
+        except Exception as e:
+            print(f"Admin notification email error: {e}")
+            print(traceback.format_exc())
+
+    @staticmethod
     def send_order_confirmation_email(data):
         """
         Send order confirmation email to customer with complete order details
